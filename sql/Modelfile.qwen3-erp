@@ -10,14 +10,15 @@ FROM qwen2.5:3b-instruct
 
 # --- Tham số sinh ---
 PARAMETER temperature 0.1
-# num_ctx 4096 (TĂNG từ 2048): agent crm_leads có 5 tool, schema + Instructions +
-# câu hỏi vượt 2048 -> Ollama context-shift cắt token giữa (log: truncated=1,
-# n_discard>1000) -> mất schema tool -> agent "không phản hồi". 4096 đủ headroom.
+# num_ctx 4096: GIỮ NGUYÊN. Prompt thực tế của agentic turn (system + 6 schema +
+# tool result) đạt 2180-2260 token (đo log task 51/132) -> 2048 sẽ TRUNCATE. 4096 đủ.
 PARAMETER num_ctx 4096
 PARAMETER num_predict 256
-# num_thread: ĐẶT = số CORE VẬT LÝ của server B (không tính hyperthread). Ollama
-# nhiều bản đặt sai trên CPU nhiều core -> chỉ ~50 tok/s dù CPU mạnh. Đo tok/s với
-# vài giá trị để chọn tối ưu. Bỏ comment + điền số thật:
+# num_thread 16: server B tuy 2 socket vật lý nhưng BIOS bật Node Interleaving ->
+# `numactl --hardware` chỉ thấy 1 NUMA node (cpus 0-15). KHÔNG bind socket được/cần.
+# Dùng cả 16 core cho prefill (prefill ~52 tok/s, compute-heavy). Generation thực ~13
+# tok/s (KHÔNG phải 2.26 — đó là 1 lần cold). Vấn đề THẬT là PREFILL 42s do prefix-cache
+# MISS (sim=0.001 -> APEX gửi phần ĐẦU prompt động). Xem report round 2 (mục Correction).
 PARAMETER num_thread 16
 #
 # Lưu ý: keep_alive KHÔNG phải tham số Modelfile. Tối ưu độ trễ đặt bằng ENV

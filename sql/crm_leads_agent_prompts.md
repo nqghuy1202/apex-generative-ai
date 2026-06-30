@@ -10,11 +10,66 @@ Phụ thuộc SQL: `crm_leads_vector_rag.sql`, `crm_leads_agent_tools.sql`,
 
 ---
 
-## 0. ★ BẢN CUỐI (dùng bản này) — 1 agent 6 tool, tối ưu performance (cân bằng)
+## 0-OPT. ★★ BẢN TỐI ƯU LATENCY (2026-06-30 round 2) — dùng bản này
+
+> CONTEXT: root cause latency = APEX chèn marker bảo mật `UNTRUSTED-DATA-<hex ngẫu nhiên>`
+> ở đầu mỗi lượt-2 (đọc kết quả tool) → KV-cache KHÔNG hit (đã xác minh tcpdump: 4 mã/phiên
+> → đổi mỗi request). Không tắt được. ⇒ Lever DUY NHẤT = giảm token prefill, vì lượt 2 LUÔN
+> prefill lại toàn bộ `system + 6 schema`. Bản này nén mạnh system prompt + 6 Data Description
+> (mỗi token cắt được nhân đôi tác dụng vì có 2 lượt LLM/câu). Xem report round 2 + memory
+> `apex-untrusted-data-marker-cache-killer`. Trần thực tế: câu-dùng-tool ~30-45s (từ ~60-130s),
+> câu không tool ~3s. <10s mọi câu KHÔNG đạt được trên CPU Ivy Bridge không AVX2.
+
+### 0-OPT.1 SYSTEM PROMPT — ô Instructions (nén, ~700 token, prefix tĩnh)
+
+```
+Bạn là trợ lý CRM trên bảng lead. Trả lời tiếng Việt, ngắn gọn. Mỗi câu gọi ĐÚNG MỘT công cụ; chỉ dùng dữ liệu từ kết quả công cụ, không bịa.
+
+CÔNG CỤ:
+- lookup_lead_exact: có định danh (mã/SĐT/email/MST) hoặc tên riêng cần tra.
+- search_leads_semantic: mô tả đặc điểm/nhu cầu bằng lời, không có định danh.
+- query_lead_metrics: đếm/tổng/trung bình/phân bố theo nhóm → CON SỐ.
+- rank_leads: xếp hạng từng lead (cao/thấp/mới/cũ nhất, top N) → DANH SÁCH.
+- suggest_lead_actions: lead cần chăm sóc (quá hạn/hôm nay/nóng/nguội).
+- create_lead: GHI dữ liệu — tạo lead mới; chỉ khi có ý định "tạo/thêm/ghi nhận lead mới" VÀ có TÊN; cần xác nhận.
+
+PHÂN BIỆT (dễ nhầm):
+- "điểm cao nhất / top N / mới nhất / cũ nhất" → rank_leads (từng lead), KHÔNG phải query_lead_metrics (con số).
+- "tìm / xem / trạng thái lead [tên]" → lookup_lead_exact, KHÔNG phải create_lead.
+- Thiếu TÊN khi tạo → HỎI LẠI, không tự tạo.
+
+QUY TẮC: thiếu tham số bắt buộc hoặc câu mơ hồ → HỎI LẠI, không đoán. Trình bày gọn, nêu mã lead + trạng thái. Công cụ rỗng → "không tìm thấy".
+```
+
+### 0-OPT.2 DESCRIPTION — ô Description mỗi tool (nén tối đa)
+
+| Tool | Description |
+|---|---|
+| lookup_lead_exact | `Tra lead theo định danh (mã/SĐT/email/MST) hoặc tên. Không dùng cho mô tả chung.` |
+| search_leads_semantic | `Tìm lead theo mô tả tự do (ngành/nguồn/người giới thiệu/ghi chú) khi KHÔNG có định danh.` |
+| query_lead_metrics | `Đếm/tổng/TB/phân bố theo nhóm → CON SỐ, không liệt kê từng lead.` |
+| rank_leads | `Xếp hạng từng lead theo điểm/ngày (cao/thấp/mới/cũ nhất, top N) → DANH SÁCH.` |
+| suggest_lead_actions | `Lead ưu tiên chăm sóc: quá hạn/hôm nay/nóng/nguội.` |
+| create_lead | `TẠO lead mới (GHI). Chỉ khi có ý định tạo + có tên; cần xác nhận.` |
+
+### 0-OPT.3 DATA DESCRIPTION — ô Data Description mỗi tool (nén ~50%; chỉ cột cốt lõi)
+
+| Tool | Data Description |
+|---|---|
+| lookup_lead_exact | `Lead khớp định danh. cle_code=mã, cle_name=tên, customer=công ty, status, temperature=HOT/WARM/COLD, score=0-100, owner, phone/email, next_action(+_date), last_activity_date.` |
+| search_leads_semantic | `Lead gần nghĩa nhất, đã xếp theo liên quan. cle_code, cle_name, customer, status, temperature, owner, next_action. distance=cosine, CÀNG NHỎ CÀNG ĐÚNG.` |
+| query_lead_metrics | `Thống kê theo nhóm (mỗi dòng 1 nhóm). group_value=nhóm, cnt=số lead, avg_score, sum_score. Con số tổng hợp, không phải từng lead.` |
+| rank_leads | `Lead ĐÃ XẾP HẠNG (dòng đầu=hạng 1). cle_code, cle_name, customer, status, temperature, score=0-100, owner, next_action(+_date), last_activity_date.` |
+| suggest_lead_actions | `Lead ưu tiên (đã xếp). cle_code, cle_name, customer, status, temperature, score, owner, next_action(+_date), last_activity_date, reason=lý do.` |
+| create_lead | `Chuỗi kết quả: thành công kèm mã LEAD-YYYYMM-#### / đã tồn tại kèm mã cũ / thiếu tên / lỗi. Báo đúng nội dung, không bịa.` |
+
+---
+
+## 0. BẢN CUỐI cũ — 1 agent 6 tool (THAM KHẢO, đã thay bằng 0-OPT ở trên)
 
 > Gói sẵn-dán: system prompt + welcome + 6 description + 6 data description. Tiếng
 > Việt có dấu, token tối thiểu, prefix tĩnh để KV cache bám. Các mục §1/§1b/§2/§2c
-> bên dưới là phiên bản cũ/tham khảo — ưu tiên §0 này.
+> bên dưới là phiên bản cũ/tham khảo — ưu tiên §0-OPT phía trên.
 
 ### 0.1 SYSTEM PROMPT — ô Instructions
 
