@@ -199,8 +199,67 @@ WHERE  UPPER(temperature) = 'HOT'
 ORDER  BY last_activity_date ASC NULLS FIRST, score DESC NULLS LAST
 FETCH  FIRST 10 ROWS ONLY;
 
+--==============================================================================
+-- TOOL 5: rank_leads  — XẾP HẠNG / TOP-N TỪNG LEAD theo trường sắp xếp được
+--   LẤP GAP: câu "lead nào điểm cao nhất / thấp nhất / mới nhất / cũ nhất",
+--   "top 10 lead điểm cao của nhân viên X". query_lead_metrics chỉ GROUP BY
+--   (trả số tổng hợp), suggest_lead_actions chỉ có mode cố định -> KHÔNG trả
+--   được từng lead xếp hạng. Tool này trả DANH SÁCH lead đã sắp xếp + filter.
+--   KHÔNG dùng vector (rẻ + nhanh trên CPU). Chỉ đọc cột cấu trúc/định danh.
+--   Tham số APEX: p_order_by (score|next_action_date|last_activity_date),
+--                 p_direction (desc=cao/mới nhất | asc=thấp/cũ nhất),
+--                 p_status, p_temperature, p_owner_emp_id, p_source (filter optional),
+--                 p_n (số dòng; "cao nhất"=1, "top 10"=10).
+--==============================================================================
+
+-- >>> SQL DÁN VÀO APEX (Tool query):
+/*
+SELECT cle_code, cle_name, customer, status, temperature, score, owner,
+       next_action, next_action_date, last_activity_date
+FROM   CRM_LEADS
+WHERE  (:p_status       IS NULL OR UPPER(status)      = UPPER(:p_status))
+  AND  (:p_temperature  IS NULL OR UPPER(temperature) = UPPER(:p_temperature))
+  AND  (:p_owner_emp_id IS NULL OR emp_id             = :p_owner_emp_id)
+  AND  (:p_source       IS NULL OR mle_norm(source)   = mle_norm(:p_source))
+ORDER  BY
+  CASE WHEN :p_order_by='score'              AND :p_direction='desc' THEN score              END DESC NULLS LAST,
+  CASE WHEN :p_order_by='score'              AND :p_direction='asc'  THEN score              END ASC  NULLS LAST,
+  CASE WHEN :p_order_by='next_action_date'   AND :p_direction='desc' THEN next_action_date   END DESC NULLS LAST,
+  CASE WHEN :p_order_by='next_action_date'   AND :p_direction='asc'  THEN next_action_date   END ASC  NULLS LAST,
+  CASE WHEN :p_order_by='last_activity_date' AND :p_direction='desc' THEN last_activity_date END DESC NULLS LAST,
+  CASE WHEN :p_order_by='last_activity_date' AND :p_direction='asc'  THEN last_activity_date END ASC  NULLS LAST,
+  score DESC NULLS LAST          -- tie-break mặc định
+FETCH  FIRST :p_n ROWS ONLY;
+-- GHI CHÚ: bỏ trục 'created_date' vì CRM_LEADS không có cột này. Nếu bảng của bạn
+-- CÓ cột ngày-tạo (dò bằng query trong crm_leads_perf_indexes.sql), thêm lại 2 dòng:
+--   CASE WHEN :p_order_by='created_date' AND :p_direction='desc' THEN <COT_NGAY_TAO> END DESC NULLS LAST,
+--   CASE WHEN :p_order_by='created_date' AND :p_direction='asc'  THEN <COT_NGAY_TAO> END ASC  NULLS LAST,
+*/
+
+-- --- TEST 5a: LEAD ĐIỂM CAO NHẤT (câu hỏi gây lỗi trước đây) — n=1, desc
+SELECT cle_code, cle_name, customer, status, temperature, score, owner
+FROM   CRM_LEADS
+ORDER  BY score DESC NULLS LAST
+FETCH  FIRST 1 ROWS ONLY;
+
+-- --- TEST 5b: TOP 10 lead điểm cao của 1 nhân viên (đổi literal emp_id)
+SELECT cle_code, cle_name, status, score, owner
+FROM   CRM_LEADS
+WHERE  emp_id = 1001
+ORDER  BY score DESC NULLS LAST
+FETCH  FIRST 10 ROWS ONLY;
+
+-- --- TEST 5c: lead có hoạt động GẦN NHẤT (last_activity_date desc)
+SELECT cle_code, cle_name, status, score, last_activity_date
+FROM   CRM_LEADS
+ORDER  BY last_activity_date DESC NULLS LAST
+FETCH  FIRST 5 ROWS ONLY;
+
+-- --- INDEX khuyến nghị cho Tool 5: dùng file riêng crm_leads_perf_indexes.sql.
+
+
 --------------------------------------------------------------------------------
--- HẾT. Test OK -> đăng ký 4 SQL (phần trong /* */) vào APEX AI Assistant,
+-- HẾT. Test OK -> đăng ký 5 SQL (phần trong /* */) vào APEX AI Assistant,
 -- dán mô tả tool + system prompt từ crm_leads_agent_prompts.md.
 --
 -- LƯU Ý:
@@ -210,4 +269,21 @@ FETCH  FIRST 10 ROWS ONLY;
 --    đăng nhập (qua APEX context / VPD) để chỉ thấy lead của mình; QUẢN LÝ để NULL.
 --  * Chuẩn hoá enum (status/temperature) về tập canonical trước khi go-live để
 --    GROUP BY (Tool 3) và pre-filter (Tool 2) không bị phân mảnh giá trị.
+--
+-- PERFORMANCE (toàn bộ 5 tool — mục tiêu phản hồi nhanh trên >500k + LLM CPU):
+--  1) ĐỊNH TUYẾN TOOL ĐÚNG là đòn bẩy lớn nhất: chỉ Tool 2 dùng vector (đắt trên
+--     CPU). Tool 1/3/4/5 là SQL cấu trúc thuần -> nhanh hơn nhiều. System prompt
+--     phải đẩy câu xếp hạng/đếm/lookup sang tool SQL, KHÔNG để rơi vào vector.
+--  2) INDEX cột sắp xếp/lọc: score, next_action_date, last_activity_date,
+--     status, temperature, emp_id (xem file crm_leads_perf_indexes.sql).
+--  3) Tool 5 ORDER BY dạng CASE rất LINH HOẠT nhưng VÔ HIỆU HOÁ index (sort toàn
+--     tập đã lọc). Giảm tải bằng: (a) luôn truyền p_n nhỏ (1-20); (b) khuyến khích
+--     model kèm filter (status/owner) để thu nhỏ tập trước khi sort. Nếu một trục
+--     xếp hạng (vd score) bị hỏi rất nhiều, tách riêng 1 tool top_by_score với
+--     ORDER BY score DESC tĩnh để DÙNG ĐƯỢC index crm_leads_score_idx.
+--  4) GIỚI HẠN SỐ DÒNG TRẢ VỀ (FETCH FIRST n) -> ít token vào LLM -> sinh nhanh
+--     hơn trên CPU. Chỉ SELECT cột cần hiển thị, tránh SELECT *.
+--  5) KHÔNG bọc mle_norm() quanh cột trong WHERE/ORDER BY trên CRM_LEADS (>500k):
+--     ép gọi JS từng dòng + tắt index -> full scan. Chuẩn hoá vào cột *_norm khi
+--     ghi, chỉ mle_norm() trên tham số (xem memory mle-normalize-at-write-not-query).
 --------------------------------------------------------------------------------
