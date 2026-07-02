@@ -9,7 +9,7 @@
 -- (SQL Workshop kén VARIABLE/BEGIN -> ORA-06502; literal chạy mọi nơi).
 --
 -- Phụ thuộc: CRM_LEADS (data), crm_leads_vector_rag.sql (crm_lead_embeddings),
---            mle_text_normalize.sql (hàm mle_norm).
+--            bodau.sql (hàm bodau — bỏ dấu TRANSLATE, thay mle_norm).
 -- Quy ước: AD-1 SQL set-based; AD-2 bind-only trong APEX (chống injection);
 --          AD-3 không filter ngầm (GROUP BY động, không ép nhóm).
 -- Mô tả tool (description) cho model: xem crm_leads_agent_prompts.md.
@@ -38,8 +38,8 @@ WHERE  (:p_code   IS NULL OR UPPER(cle_code) = UPPER(:p_code))
                              REGEXP_REPLACE(:p_phone,'[^0-9]',''))
   AND  (:p_email  IS NULL OR LOWER(email) = LOWER(:p_email))
   AND  (:p_tax_id IS NULL OR UPPER(tax_id) = UPPER(:p_tax_id))
-  AND  (:p_name   IS NULL OR mle_norm(cle_name) LIKE '%' || mle_norm(:p_name) || '%'
-                          OR mle_norm(customer) LIKE '%' || mle_norm(:p_name) || '%')
+  AND  (:p_name   IS NULL OR bodau(cle_name) LIKE '%' || bodau(:p_name) || '%'
+                          OR bodau(customer) LIKE '%' || bodau(:p_name) || '%')
 ORDER  BY cle_name
 FETCH  FIRST 50 ROWS ONLY;
 */
@@ -57,11 +57,11 @@ WHERE  REGEXP_REPLACE(phone,'[^0-9]','')        = REGEXP_REPLACE('0901234567','[
    OR  REGEXP_REPLACE(contact_phone,'[^0-9]','')= REGEXP_REPLACE('0901234567','[^0-9]','')
 FETCH  FIRST 50 ROWS ONLY;
 
--- --- TEST 1c: tra theo tên gõ KHÔNG dấu (mle_norm bỏ dấu 2 phía)
+-- --- TEST 1c: tra theo tên gõ KHÔNG dấu (bodau bỏ dấu 2 phía)
 SELECT cle_code, cle_name, customer, status
 FROM   CRM_LEADS
-WHERE  mle_norm(cle_name) LIKE '%' || mle_norm('cong ty thep') || '%'
-    OR mle_norm(customer) LIKE '%' || mle_norm('cong ty thep') || '%'
+WHERE  bodau(cle_name) LIKE '%' || bodau('cong ty thep') || '%'
+    OR bodau(customer) LIKE '%' || bodau('cong ty thep') || '%'
 FETCH  FIRST 50 ROWS ONLY;
 
 
@@ -116,12 +116,15 @@ FETCH  APPROX FIRST 10 ROWS ONLY;
 
 -- >>> SQL DÁN VÀO APEX (Tool query):
 /*
+-- LƯU Ý (fix bug p_group_by='owner'): MỌI nhánh CASE phải CÙNG kiểu dữ liệu, nếu
+-- không -> ORA-00932 "inconsistent datatypes". owner/emp_id có thể là NUMBER còn
+-- status/temperature/source là VARCHAR2 -> ép TO_CHAR toàn bộ để đồng nhất kiểu.
 SELECT NVL(
          CASE :p_group_by
-           WHEN 'status'      THEN status
-           WHEN 'temperature' THEN temperature
-           WHEN 'source'      THEN source
-           WHEN 'owner'       THEN owner
+           WHEN 'status'      THEN TO_CHAR(status)
+           WHEN 'temperature' THEN TO_CHAR(temperature)
+           WHEN 'source'      THEN TO_CHAR(source)
+           WHEN 'owner'       THEN TO_CHAR(owner)
          END, '(tat ca / all)')   AS group_value,
        COUNT(*)                    AS cnt,
        ROUND(AVG(score), 2)        AS avg_score,
@@ -129,12 +132,12 @@ SELECT NVL(
 FROM   CRM_LEADS
 WHERE  (:p_status      IS NULL OR UPPER(status)      = UPPER(:p_status))
   AND  (:p_temperature IS NULL OR UPPER(temperature) = UPPER(:p_temperature))
-  AND  (:p_source      IS NULL OR mle_norm(source)   = mle_norm(:p_source))
+  AND  (:p_source      IS NULL OR bodau(source)   = bodau(:p_source))
 GROUP  BY CASE :p_group_by
-            WHEN 'status'      THEN status
-            WHEN 'temperature' THEN temperature
-            WHEN 'source'      THEN source
-            WHEN 'owner'       THEN owner
+            WHEN 'status'      THEN TO_CHAR(status)
+            WHEN 'temperature' THEN TO_CHAR(temperature)
+            WHEN 'source'      THEN TO_CHAR(source)
+            WHEN 'owner'       THEN TO_CHAR(owner)
           END
 ORDER  BY cnt DESC;
 */
@@ -149,6 +152,12 @@ ORDER  BY cnt DESC;
 SELECT '(tat ca / all)' AS group_value, COUNT(*) AS cnt
 FROM   CRM_LEADS
 WHERE  UPPER(temperature) = UPPER('HOT');
+
+-- --- TEST 3c: nhóm theo owner (câu gây ORA-00932 trước đây) — TO_CHAR đồng nhất kiểu
+SELECT TO_CHAR(owner) AS group_value, COUNT(*) AS cnt, ROUND(AVG(score),2) AS avg_score
+FROM   CRM_LEADS
+GROUP  BY TO_CHAR(owner)
+ORDER  BY cnt DESC;
 
 
 --==============================================================================
@@ -220,7 +229,7 @@ FROM   CRM_LEADS
 WHERE  (:p_status       IS NULL OR UPPER(status)      = UPPER(:p_status))
   AND  (:p_temperature  IS NULL OR UPPER(temperature) = UPPER(:p_temperature))
   AND  (:p_owner_emp_id IS NULL OR emp_id             = :p_owner_emp_id)
-  AND  (:p_source       IS NULL OR mle_norm(source)   = mle_norm(:p_source))
+  AND  (:p_source       IS NULL OR bodau(source)   = bodau(:p_source))
 ORDER  BY
   CASE WHEN :p_order_by='score'              AND :p_direction='desc' THEN score              END DESC NULLS LAST,
   CASE WHEN :p_order_by='score'              AND :p_direction='asc'  THEN score              END ASC  NULLS LAST,
@@ -283,7 +292,9 @@ FETCH  FIRST 5 ROWS ONLY;
 --     ORDER BY score DESC tĩnh để DÙNG ĐƯỢC index crm_leads_score_idx.
 --  4) GIỚI HẠN SỐ DÒNG TRẢ VỀ (FETCH FIRST n) -> ít token vào LLM -> sinh nhanh
 --     hơn trên CPU. Chỉ SELECT cột cần hiển thị, tránh SELECT *.
---  5) KHÔNG bọc mle_norm() quanh cột trong WHERE/ORDER BY trên CRM_LEADS (>500k):
---     ép gọi JS từng dòng + tắt index -> full scan. Chuẩn hoá vào cột *_norm khi
---     ghi, chỉ mle_norm() trên tham số (xem memory mle-normalize-at-write-not-query).
+--  5) bodau() là SQL thuần + DETERMINISTIC nên bọc quanh cột KHÔNG tắt index NẾU
+--     có FUNCTION-BASED INDEX bodau(cột) (xem bodau.sql). Khác hẳn mle_norm (MLE/JS
+--     per-row không index được). ĐIỀU KIỆN: WHERE viết đúng dạng bodau(cột)=bodau(:p)
+--     hoặc bodau(cột) LIKE 'X%' (LIKE '%X%' vẫn full-scan vì leading %). Tạo FBI cho
+--     cle_name/customer/source trước go-live (memory mle-normalize-at-write-not-query).
 --------------------------------------------------------------------------------

@@ -13,6 +13,13 @@ PARAMETER temperature 0.1
 # num_ctx 4096: GIỮ NGUYÊN. Prompt thực tế của agentic turn (system + 6 schema +
 # tool result) đạt 2180-2260 token (đo log task 51/132) -> 2048 sẽ TRUNCATE. 4096 đủ.
 PARAMETER num_ctx 4096
+# num_batch 1024 (mặc định 512): số token xử lý SONG SONG trong pha PREFILL. Prefill
+# trên CPU là compute-bound (matmul) -> batch lớn tận dụng SIMD/cache tốt hơn (benchmark
+# 512->1024 tăng throughput ~60%). Prompt agentic ~1700-2900 token = đúng vùng batch lớn
+# có tác dụng; server B còn ~37GB RAM nên chỉ tốn bộ nhớ tạm. ĐO sau rebuild: 512 vs 1024
+# vs 2048, giữ giá trị cho 'prompt eval tok/s' cao nhất. ĐỪNG hạ <32 (mất kernel prefill
+# tối ưu của llama.cpp). Xem report round 3 §3 (đòn bẩy #2).
+PARAMETER num_batch 1024
 PARAMETER num_predict 256
 # num_thread 16: server B tuy 2 socket vật lý nhưng BIOS bật Node Interleaving ->
 # `numactl --hardware` chỉ thấy 1 NUMA node (cpus 0-15). KHÔNG bind socket được/cần.
