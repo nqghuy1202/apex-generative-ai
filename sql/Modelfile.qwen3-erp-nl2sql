@@ -1,0 +1,36 @@
+# Modelfile.qwen3-erp-nl2sql — Phase B (2026-07-04)
+# Model TỐI ƯU cho NL->SQL single-call structured-output trên server B (CPU, no AVX2).
+# Chạy trên SERVER B (bash), KHÔNG phải Windows dev box:
+#   ollama create qwen3-erp -f Modelfile.qwen3-erp-nl2sql
+# (giữ TÊN qwen3-erp để crm_nl2sql_pkg.g_model không phải đổi)
+#
+# KHÁC Modelfile.qwen3-erp gốc: giảm num_ctx (prompt NL->SQL tí hon, không tool/RAG),
+# giảm num_predict (JSON ngắn), temp 0 (bám schema), num_batch cao (prefill nhanh).
+# BENCHMARK num_batch: thử 512 / 1024 / 2048, giữ giá trị nhanh nhất trên server B.
+
+FROM qwen2.5:3b-instruct
+
+# Bám schema tuyệt đối + xác định
+PARAMETER temperature 0
+PARAMETER top_p 0.9
+
+# Prefill/latency levers. LƯU Ý: Ollama KHÔNG chấp nhận comment cùng dòng với
+# PARAMETER (sẽ nuốt '# ...' vào giá trị -> "invalid int value"). Comment phải
+# ở dòng riêng như dưới đây.
+# num_ctx 2048: NL->SQL prompt nhỏ; 4096 thừa -> prefill lâu hơn.
+PARAMETER num_ctx 2048
+# num_predict 128: JSON intent ngắn; cap generation.
+PARAMETER num_predict 128
+# num_batch: benchmark 512 / 1024 / 2048, giữ giá trị nhanh nhất.
+PARAMETER num_batch 1024
+# num_thread 16: = số core vật lý (server B 1 NUMA node).
+PARAMETER num_thread 16
+
+# System prompt ĐỂ TRỐNG ở Modelfile: crm_nl2sql_pkg gửi system prompt cố định
+# (byte-identical) qua uc_ai -> tái dùng KV-cache prefix. Không set SYSTEM ở đây để
+# tránh trùng/chèn thêm token.
+
+# Ghi chú env trên server B (systemd override của ollama):
+#   OLLAMA_KEEP_ALIVE=-1          (không unload -> không cold reload)
+#   OLLAMA_NUM_PARALLEL=1         (serialize; CPU no-AVX2 chạy song song sẽ thrash)
+#   OLLAMA_MAX_LOADED_MODELS=2    (qwen3-erp + bge-m3 cùng resident, RAM ~37GB dư)
